@@ -246,7 +246,7 @@ details.raw summary::-webkit-details-marker{display:none}
   </div>
   <div id="results" hidden></div>
 </div>
-<input type="file" id="file" accept="audio/*,video/*,.m4a,.amr,.3gp" multiple hidden>
+<input type="file" id="file" multiple hidden>
 <section class="page drawer" id="pDrawer"><div class="dr-in">
   <div class="dr-top"><button class="ib" data-back aria-label="닫기"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 9h14M5 15h9"/></svg></button></div>
   <div class="dr-list" id="drList"></div>
@@ -312,8 +312,10 @@ const clientKey=r=>r.phone||r.name||'unknown';
 function audioDuration(blob){return new Promise(res=>{const a=document.createElement('audio');a.preload='metadata';const u=URL.createObjectURL(blob);a.onloadedmetadata=()=>{let d=a.duration;if(!isFinite(d)){a.currentTime=1e7;a.ontimeupdate=()=>{a.ontimeupdate=null;res(isFinite(a.duration)?a.duration:0);URL.revokeObjectURL(u)};return}URL.revokeObjectURL(u);res(d)};a.onerror=()=>{URL.revokeObjectURL(u);res(0)};a.src=u})}
 
 /* ---------- 입력 ---------- */
+const AUDIO_EXT=/\.(m4a|mp3|wav|amr|3gp|3ga|aac|ogg|oga|opus|flac|webm|mp4|m4v|mov|wma)$/i;
 async function addFiles(files){
-  if(!files.length)return;
+  files=files.filter(f=>(f.type||'').startsWith('audio/')||(f.type||'').startsWith('video/')||AUDIO_EXT.test(f.name||''));
+  if(!files.length){toast('녹음 파일(m4a, mp3 등)만 넣을 수 있습니다');return}
   for(const f of files){
     const p=parseFile(f.name||'녹음',f.lastModified);
     const id='r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
@@ -321,7 +323,9 @@ async function addFiles(files){
     const rec={id,fileName:f.name,name:p.name,phone:p.phone,date:p.date,dur,status:'wait',createdAt:Date.now(),ai:null,segments:[],text:'',done:{},sent:false,cost:{groq:0,inTok:0,outTok:0}};
     await put('audio',f,id);await put('records',rec);
   }
-  await load();toast(`${files.length}개 파일을 받았습니다`);runQueue();
+  await load();
+  if(!S.groqKey||!S.claudeKey){toast('설정에서 연결 키를 넣으면 바로 정리를 시작합니다',3000);renderSettings();return}
+  toast(`${files.length}개 파일을 받았습니다`);runQueue();
 }
 async function takeInbox(){
   const items=await tx('inbox','readonly',s=>s.getAll());
@@ -759,13 +763,12 @@ function renderSettings(){
       <div class="field"><label for="s2">Claude 키</label><input id="s2" type="password" value="${esc(S.claudeKey)}" placeholder="sk-ant-..."></div>
       <div class="field"><label for="s5">AI 메모장 주소</label><input id="s5" value="${esc(S.memoUrl)}" placeholder="https://..."></div>
     </details>
-    <div class="btns"><button class="btn pri" id="saveSet">저장</button>${RECS.some(r=>r.sample)?'<button class="btn danger" id="delSample">샘플 지우기</button>':''}</div></div>`;
+    <div class="btns"><button class="btn pri" id="saveSet">저장</button></div></div>`;
   $('#saveSet').onclick=()=>{S.me=$('#s4').value.trim();S.title=$('#s8').value.trim();S.groqKey=$('#s1').value.trim();S.claudeKey=$('#s2').value.trim();S.memoUrl=$('#s5').value.trim();saveSet();toast('저장했습니다');greet();runQueue()};
-  const ds=$('#delSample');if(ds)ds.onclick=async()=>{for(const r of RECS.filter(r=>r.sample))await del('records',r.id);await load();toast('샘플을 지웠습니다');renderSettings()};
   let taps=0,tt=null;$('#setTitle').onclick=()=>{taps++;clearTimeout(tt);tt=setTimeout(()=>taps=0,1500);if(taps>=5){taps=0;S.owner=!S.owner;saveSet();toast(S.owner?'관리자 모드를 켰습니다':'관리자 모드를 껐습니다');renderSettings()}};
   openPage('pSettings');
 }
-function greet(){const t=$('#heroTitle');if(!t||PROG||lastDone)return;const hh=$('#heroHint');if(hh)hh.textContent=(S.groqKey&&S.claudeKey)?'눌러서 고르거나, 통화 녹음에서 공유로 보내세요':'지금은 체험 모드입니다. 폴더를 누르면 샘플로 정리 과정을 보여드려요';const who=[S.me,S.title].filter(Boolean).join(' ');t.textContent=who?`${S.title||S.me}, 이 폴더에 녹음 파일을 넣어주세요`:'이 폴더에 녹음 파일을 넣어주세요'}
+function greet(){const t=$('#heroTitle');if(!t||PROG||lastDone)return;const hh=$('#heroHint');if(hh)hh.textContent='눌러서 고르거나, 통화 녹음에서 공유로 보내세요';const who=[S.me,S.title].filter(Boolean).join(' ');t.textContent=who?`${S.title||S.me}, 이 폴더에 녹음 파일을 넣어주세요`:'이 폴더에 녹음 파일을 넣어주세요'}
 
 /* ---------- 화면 이동 ---------- */
 const stack=[];
@@ -776,7 +779,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-back]');if
 
 /* ---------- 이벤트 ---------- */
 $('#file').onchange=e=>{addFiles([...e.target.files]);e.target.value=''};
-const drop=$('#fold');drop.onclick=()=>{if(!S.groqKey||!S.claudeKey){runDemo();return}$('#file').click()};
+const drop=$('#fold');drop.onclick=()=>$('#file').click();
 const zone=$('#hero');
 ['dragenter','dragover'].forEach(ev=>zone.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over')}));
 ['dragleave','drop'].forEach(ev=>zone.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over')}));
@@ -890,41 +893,12 @@ $('#pDrawer').addEventListener('click',e=>{
   if(e.target.closest('#drSet')){history.back();setTimeout(renderSettings,60)}
 });
 
-/* ---------- 체험 모드 (키 넣기 전) ---------- */
-function sampleSegs(dur,lines){const out=[];let t=0,i=0;while(t<dur){const len=8+Math.random()*30;out.push({start:t,end:Math.min(dur,t+len-2),text:lines[i%lines.length]});t+=len+(Math.random()<.15?25:0);i++}return out}
-const SAMPLE_LINES=['네 원장님, 수고가 많으십니다.','지난번 말씀하신 겨울특강 건으로 연락드렸어요.','홍보는 11월 둘째 주부터 시작하시면 설명회 전에 노출이 충분히 쌓입니다.','블로그는 먼저 3편 정도 올리고 카드뉴스를 같이 묶어서 가는 걸 추천드려요.','수업 사진은 이번 주 안에 보내드릴게요.','사진 받으면 카드뉴스 시안 두 가지로 보내드리겠습니다.','요즘 아이가 학교에서 발표를 한다고 해서요.','다음 주 화요일 오전 10시에 학원으로 찾아뵐게요.'];
-const SAMPLES=[
- {t:'겨울특강 홍보 일정 조율',p:['업무','식스 영어학원','김학성 원장님'],nm:'김학성 원장님',d:1,dur:3750,s:['겨울특강 홍보를 11월 둘째 주부터 시작합니다.','블로그 글 3편과 카드뉴스를 먼저 준비합니다.','원장님이 수업 사진을 이번 주에 보내주기로 했습니다.'],td:[['겨울특강 블로그 3편 기획','나','금요일',840],['카드뉴스 시안 2종 보내드리기','나','',1150],['수업 사진 보내주기','상대','이번 주',null]],ap:['10/28 화 오전 10시 학원 방문 촬영'],fl:[[0,150,'기타','인사, 안부'],[150,1260,'핵심','겨울특강 홍보 일정'],[1260,1700,'사적','아이 학교 이야기'],[1700,2900,'핵심','블로그 단가, 리뷰 관리'],[2900,3150,'사적','주말 골프 이야기'],[3150,3750,'기타','다음 미팅 날짜, 마무리']],topic:'브랜드 마케팅'},
- {t:'블로그 대행 견적 상담',p:['업무','정성훈 형님'],nm:'정성훈 형님',d:0,dur:1120,s:['월 8건 블로그 대행 견적을 요청했습니다.','플레이스 리뷰 관리도 묶어서 받고 싶어합니다.'],td:[['8건 패키지 제안서 작성','나','금요일',400]],ap:['금요일 오후 통화'],fl:[[0,80,'기타','인사'],[80,900,'핵심','견적과 범위'],[900,1120,'사적','근황']],topic:'블로그 대행'},
- {t:'상담 전화 응대 방식',p:['업무','식스 영어학원','김학성 원장님'],nm:'김학성 원장님',d:7,dur:1260,s:['첫 통화에서 레벨테스트 예약까지 잇는 흐름을 제안했습니다.'],td:[['상담 응대 스크립트 초안','나','',600]],ap:[],fl:[[0,60,'기타','인사'],[60,1200,'핵심','응대 흐름'],[1200,1260,'기타','마무리']],topic:'상담 응대'},
- {t:'플레이스 사진 촬영 문의',p:['업무','수진 필라테스','이수진 대표님'],nm:'이수진 대표님',d:9,dur:840,s:['플레이스 대표 사진을 새로 찍고 싶어합니다.'],td:[['촬영 콘티 정리','나','월요일',300]],ap:['다음 주 화 오전 촬영'],fl:[[0,60,'기타','인사'],[60,840,'핵심','촬영 범위']],topic:'플레이스 촬영'},
- {t:'유튜브 채널 방향 회의',p:['내 브랜딩','BIUP 콘텐츠'],nm:'',d:11,dur:2400,s:['원장님 대상 숏폼 시리즈로 방향을 잡았습니다.'],td:[['숏폼 기획안 5편','나','',1500]],ap:[],fl:[[0,2000,'핵심','채널 방향'],[2000,2400,'기타','기타']],topic:'채널 기획'},
- {t:'주말 일정 정리',p:['개인','가족'],nm:'',d:12,dur:360,s:['토요일 오전 병원, 오후 아이 수업입니다.'],td:[['토요일 오전 예약 확인','나','',120]],ap:['토 오전 10시'],fl:[[0,360,'사적','주말 일정']],topic:'주말 일정'}];
-function sampleRec(x,i){const segs=sampleSegs(x.dur,SAMPLE_LINES);const id='demo'+i;const date=Date.now()-x.d*864e5-3600e3*(i+1);
-  const rec={id,sample:true,fileName:'샘플 녹음',name:x.nm,phone:'',date,dur:x.dur,status:'done',createdAt:date,segments:segs,text:segs.map(s=>s.text).join(' '),done:{},sent:false,cost:{groq:0,inTok:0,outTok:0},
-    ai:{title:x.t,topic:x.topic,path:x.p,folder:x.p[x.p.length-1],summary:x.s,todos:x.td.map(t=>({task:t[0],owner:t[1],due:t[2],at:t[3]})),appts:x.ap,decisions:[],points:[],flow:x.fl.map(f=>({s:f[0],e:f[1],k:f[2],l:f[3]}))}};
-  rec.dens=textDensity(segs,x.dur);assignFolder(rec);return rec}
-async function seedSamples(){if(RECS.some(r=>r.sample))return;for(let i=1;i<SAMPLES.length;i++)await put('records',sampleRec(SAMPLES[i],i));await load()}
-let demoRunning=false;
-async function runDemo(){
-  if(demoRunning)return;demoRunning=true;
-  try{
-    await seedSamples();
-    const x=SAMPLES[0];const rec=sampleRec(x,0);rec.id='demo0_'+Date.now();rec.date=Date.now();rec.createdAt=Date.now();rec.name='식스김학성원장님';const ai=rec.ai;rec.ai=null;rec.status='stt';
-    PROG={id:rec.id,pct:0};heroBusy({name:'통화 녹음 식스김학성원장님'},0);drawProg();
-    setTimeout(()=>{if(PROG&&PROG.id===rec.id&&!PROG.textShape)setHeights(rec.dens.map(v=>v*(0.5+Math.random())))},350);
-    await new Promise(r=>{let p=0;const iv=setInterval(()=>{p+=1.1;setPct(p);if(p>=55){clearInterval(iv);r()}},45)});
-    PROG.textShape=1;setHeights(rec.dens);
-    const txt=`제목: ${ai.title}\n경로: ${ai.path.join(' > ')}\n요약:\n${ai.summary.map(s=>'- '+s).join('\n')}\n할 일:\n${ai.todos.map(t=>`- ${t.task}${t.due?` (${t.due})`:''} [${t.owner}]`).join('\n')}\n약속:\n${ai.appts.map(s=>'- '+s).join('\n')}`;
-    await new Promise(r=>{let k=0;const iv=setInterval(()=>{k+=3;const part=txt.slice(0,k);$('#live').innerHTML=liveHTML(parseSum(part),true);setPct(55+Math.min(40,k/txt.length*40));if(k>=txt.length){clearInterval(iv);r()}},30)});
-    rec.ai=ai;rec.status='done';assignFolder(rec);await put('records',rec);await load();heroDone(rec);
-    toast('샘플로 보여드렸습니다',2000);
-  }finally{demoRunning=false;PROG=null}
-}
-
 /* ---------- 시작 ---------- */
 (async()=>{
   buildTicks();drawProg();greet();DB=await openDB();await load();
+  {const sm=RECS.filter(r=>r.sample);if(sm.length){for(const r of sm)await del('records',r.id);
+    const used=new Set();RECS.filter(r=>!r.sample&&r.folderId).forEach(r=>pathOf(r.folderId).forEach(f=>used.add(f.id)));
+    FOLDERS=FOLDERS.filter(f=>!f.parentId||used.has(f.id)||!f.auto);saveFolders();await load()}}
   if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
   await takeInbox();
   if(location.search.includes('shared'))history.replaceState(null,'',location.pathname);

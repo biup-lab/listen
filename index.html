@@ -208,8 +208,10 @@ details.raw summary::-webkit-details-marker{display:none}
 .opt.on{color:var(--deep)}
 .field{margin-bottom:16px}
 .field label{display:block;font-size:13.5px;font-weight:600;margin-bottom:6px}
-.field input,.field select{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:var(--bg)}
+.field input,.field select{box-sizing:border-box;width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:var(--bg)}
 .field p{margin:6px 0 0;font-size:12.5px;color:var(--sub)}
+.acct{display:flex;align-items:center;gap:12px;background:var(--soft2);border:1px solid var(--line);border-radius:16px;padding:14px 14px 14px 16px;margin-bottom:20px}
+.acct>div{flex:1;min-width:0}.acct b{display:block;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.acct p{margin:3px 0 0;font-size:12.5px;color:var(--sub);line-height:1.45}.acct .btn{flex:none}
 .usage{background:var(--soft);border-radius:18px;padding:18px;margin-bottom:22px}
 .usage .big{font-size:30px;font-weight:800;letter-spacing:-.03em}
 .usage .cmp{font-size:14px;color:var(--sub);margin-top:2px}
@@ -269,15 +271,124 @@ details.raw summary::-webkit-details-marker{display:none}
 let DB;
 function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open('listen',1);r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains('records'))d.createObjectStore('records',{keyPath:'id'});if(!d.objectStoreNames.contains('audio'))d.createObjectStore('audio');if(!d.objectStoreNames.contains('inbox'))d.createObjectStore('inbox',{autoIncrement:true})};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
 function tx(store,mode,fn){return new Promise((res,rej)=>{const t=DB.transaction(store,mode);const s=t.objectStore(store);let out;const r=fn(s);if(r)r.onsuccess=()=>out=r.result;t.oncomplete=()=>res(out);t.onerror=()=>rej(t.error)})}
-const put=(st,v,k)=>tx(st,'readwrite',s=>s.put(v,k));
+const rawPut=(st,v,k)=>tx(st,'readwrite',s=>s.put(v,k));
 const get=(st,k)=>tx(st,'readonly',s=>s.get(k));
-const del=(st,k)=>tx(st,'readwrite',s=>s.delete(k));
+const rawDel=(st,k)=>tx(st,'readwrite',s=>s.delete(k));
 const all=st=>tx(st,'readonly',s=>s.getAll());
+async function put(st,v,k){
+  if(st==='records'){v.updatedAt=Date.now();if(!v.dev)v.dev=DEVICE}
+  const out=await rawPut(st,v,k);
+  if(st==='records')cloud.rec(v);
+  if(st==='audio')cloud.audio(k,v);
+  return out;
+}
+async function del(st,k){const out=await rawDel(st,k);if(st==='records')cloud.recDel(k);return out}
+
+/* ---------- 클라우드 동기화 (Firebase) ---------- */
+const DEVICE=(()=>{try{let d=localStorage.getItem('listen-dev');if(!d){d='d'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);localStorage.setItem('listen-dev',d)}return d}catch{return'd0'}})();
+const FB_CFG={apiKey:"AIzaSyAuNmwz77xaWoySCnayHqO1wag8k5cO1co",authDomain:"biup-listen.firebaseapp.com",projectId:"biup-listen",storageBucket:"biup-listen.firebasestorage.app",messagingSenderId:"407550754108",appId:"1:407550754108:web:c18277a0c7c8dad5ae3239"};
+const FB_V='https://www.gstatic.com/firebasejs/13.1.0/';
+const cloud={
+  ready:false,user:null,m:null,auth:null,db:null,st:null,unsubs:[],metaU:{},
+  async init(){
+    try{
+      const [app,au,fs,st]=await Promise.all(['firebase-app','firebase-auth','firebase-firestore','firebase-storage'].map(n=>import(FB_V+n+'.js')));
+      this.m={...au,...fs,...st};const a=app.initializeApp(FB_CFG);
+      this.auth=au.getAuth(a);this.db=fs.getFirestore(a);this.st=st.getStorage(a);
+      au.getRedirectResult(this.auth).catch(e=>console.warn(e));
+      au.onAuthStateChanged(this.auth,u=>{this.user=u;this.stop();if(u)this.start();this.ui()});
+    }catch(e){console.warn('cloud init',e)}
+  },
+  async login(){
+    if(!this.m){toast('인터넷 연결을 확인하세요');return}
+    const pr=new this.m.GoogleAuthProvider();pr.setCustomParameters({prompt:'select_account'});
+    try{await this.m.signInWithPopup(this.auth,pr)}
+    catch(e){if(/popup-blocked|operation-not-supported|cancelled-popup/.test(e.code||''))return this.m.signInWithRedirect(this.auth,pr);if(!/popup-closed/.test(e.code||''))toast('로그인하지 못했습니다');console.warn(e)}
+  },
+  async logout(){if(!this.m)return;await this.m.signOut(this.auth);toast('로그아웃했습니다. 이 기기 기록은 그대로 남아 있습니다',3000)},
+  base(){return'users/'+this.user.uid},
+  col(n){return this.m.collection(this.db,this.base()+'/'+n)},
+  doc(n,id){return this.m.doc(this.db,this.base()+'/'+n+'/'+id)},
+  aref(id){return this.m.ref(this.st,this.base()+'/audio/'+id)},
+  stop(){this.unsubs.forEach(f=>f());this.unsubs=[];this.ready=false;this.metaU={}},
+  async start(){
+    const m=this.m;let first=true;
+    // 기록: 실시간으로 받아오고, 처음 로그인 때 이 기기에만 있던 기록은 올린다
+    this.unsubs.push(m.onSnapshot(this.col('records'),async snap=>{
+      let changed=false;const local=new Map((await all('records')).map(r=>[r.id,r]));
+      for(const ch of snap.docChanges()){
+        const d=ch.doc.data();const id=ch.doc.id;const lr=local.get(id);
+        if(ch.type==='removed')continue;
+        if(d.deleted){if(lr){await rawDel('records',id);await rawDel('audio',id);changed=true}continue}
+        if(lr&&(lr.updatedAt||0)>=(d.u||0))continue;
+        try{const r=JSON.parse(d.j);await rawPut('records',r);changed=true}catch(e){console.warn(e)}
+      }
+      if(first){first=false;
+        const ids=new Set(snap.docs.map(x=>x.id));
+        for(const r of local.values())if(!ids.has(r.id))this.rec(r);
+        for(const k of await tx('audio','readonly',s=>s.getAllKeys())){const b=await get('audio',k);if(b)this.audio(k,b)}
+        this.ready=true;
+      }
+      if(changed)debounceLoad();
+    },e=>console.warn('records sync',e)));
+    // 설정·폴더
+    this.unsubs.push(m.onSnapshot(this.doc('meta','settings'),snap=>this.applyMeta('settings',snap),e=>console.warn(e)));
+    this.unsubs.push(m.onSnapshot(this.doc('meta','folders'),snap=>this.applyMeta('folders',snap),e=>console.warn(e)));
+  },
+  applyMeta(kind,snap){
+    if(snap.metadata.hasPendingWrites)return;
+    const firstTime=!this.metaU[kind];this.metaU[kind]=1;
+    const d=snap.exists()?snap.data():null;let v=null;try{v=d&&JSON.parse(d.j)}catch{}
+    if(kind==='settings'){
+      if(v){for(const k in v){if(k==='owner')continue;if(firstTime&&!v[k]&&S[k])continue;S[k]=v[k]}localStorage.setItem('listen-set',JSON.stringify(S));greet();if(S.groqKey&&S.claudeKey)runQueue()}
+      if(firstTime&&(!v||Object.keys(S).some(k=>k!=='owner'&&S[k]&&!v[k])))this.meta('settings');
+      if(document.getElementById('pSettings').classList.contains('open'))renderSettings(true);
+    }else{
+      if(v&&Array.isArray(v)){
+        if(firstTime){const ids=new Set(v.map(f=>f.id));FOLDERS=v.concat(FOLDERS.filter(f=>!ids.has(f.id)&&!/^top\d$/.test(f.id)))}else FOLDERS=v;
+        localStorage.setItem('listen-folders',JSON.stringify(FOLDERS));debounceLoad();
+      }
+      if(firstTime)this.meta('folders');
+    }
+  },
+  meta(kind){
+    if(!this.user||!this.m)return;
+    const v=kind==='settings'?(({owner,...x})=>x)(S):FOLDERS;
+    this.m.setDoc(this.doc('meta',kind),{j:JSON.stringify(v),u:Date.now()}).catch(e=>console.warn(e));
+  },
+  rec(r){
+    if(!this.user||!this.m)return;
+    this.m.setDoc(this.doc('records',r.id),{j:JSON.stringify(r),u:r.updatedAt||Date.now()}).catch(e=>console.warn('rec up',e));
+  },
+  recDel(id){
+    if(!this.user||!this.m)return;
+    this.m.setDoc(this.doc('records',id),{deleted:true,u:Date.now()}).catch(e=>console.warn(e));
+    this.m.deleteObject(this.aref(id)).catch(()=>{});
+  },
+  audio(id,blob){
+    if(!this.user||!this.m||!blob)return;
+    this.m.uploadBytesResumable(this.aref(id),blob,{contentType:blob.type||'audio/mp4'}).catch?.(e=>console.warn('audio up',e));
+  },
+  async audioUrl(id){if(!this.user||!this.m)return null;try{return await this.m.getDownloadURL(this.aref(id))}catch{return null}},
+  ui(){
+    const b=$('#acctBtn');if(b)b.classList.toggle('on',!!this.user);
+    if(document.getElementById('pSettings').classList.contains('open'))renderSettings(true);
+    if(openId&&document.getElementById('pDetail').classList.contains('open'))attachAudio(openId);
+  }
+};
+let _ld=null;function debounceLoad(){clearTimeout(_ld);_ld=setTimeout(()=>{load();if(openId&&document.getElementById('pDetail').classList.contains('open'))renderDetail(openId,true)},250)}
+async function attachAudio(id){
+  const box=document.getElementById('audioBox');if(!box)return;
+  const local=await get('audio',id);let url=null;
+  if(local)url=URL.createObjectURL(local);else url=await cloud.audioUrl(id);
+  if(!url||openId!==id)return;
+  box.hidden=false;box.querySelector('audio').src=url;
+}
 
 const S=JSON.parse(localStorage.getItem('listen-set')||'{}');
 const DEF={groqKey:'',claudeKey:'',model:'claude-haiku-5-5',me:'',title:'',memoUrl:'',krw:1400,subs:28000,inRate:1,outRate:5};
 for(const k in DEF) if(S[k]===undefined) S[k]=DEF[k];
-const saveSet=()=>localStorage.setItem('listen-set',JSON.stringify(S));
+const saveSet=()=>{localStorage.setItem('listen-set',JSON.stringify(S));if(typeof cloud!=='undefined')cloud.meta('settings')};
 
 let RECS=[], Q="";
 
@@ -542,7 +653,7 @@ async function runQueue(){
   try{
     while(true){
       const recs=await all('records');
-      const pend=recs.filter(r=>r.status==='wait'||r.status==='stt'||r.status==='sum').sort((a,b)=>a.createdAt-b.createdAt);
+      const pend=recs.filter(r=>(r.status==='wait'||r.status==='stt'||r.status==='sum')&&(!r.dev||r.dev===DEVICE)).sort((a,b)=>a.createdAt-b.createdAt);
       const rec=pend[0];if(!rec)break;
       PROG={id:rec.id,pct:0};heroBusy(rec,pend.length-1);drawProg();
       try{
@@ -586,7 +697,7 @@ async function runQueue(){
 let FOLDERS=JSON.parse(localStorage.getItem('listen-folders')||'[]');
 if(!FOLDERS.length){['업무','내 브랜딩','개인'].forEach((n,i)=>FOLDERS.push({id:'top'+i,name:n,auto:false,parentId:null,createdAt:i}))}
 FOLDERS.forEach(f=>{if(f.parentId===undefined)f.parentId=null});
-const saveFolders=()=>localStorage.setItem('listen-folders',JSON.stringify(FOLDERS));saveFolders();
+const saveFolders=()=>{localStorage.setItem('listen-folders',JSON.stringify(FOLDERS));if(cloud.ready)cloud.meta('folders')};saveFolders();
 const norm=s=>(s||'').replace(/\s+/g,'').toLowerCase();
 const kids=pid=>FOLDERS.filter(f=>f.parentId===pid);
 function pathOf(fid){const out=[];let f=FOLDERS.find(x=>x.id===fid);let g=0;while(f&&g++<6){out.unshift(f);f=FOLDERS.find(x=>x.id===f.parentId)}return out}
@@ -694,6 +805,7 @@ function renderDetail(id,silent){
     ${a?`<h1 class="d-title">${esc(a.title)}</h1>
     <p class="meta" style="margin:0 0 16px">${esc(r.name||'')}${r.name?' / ':''}${fullDate(r.date)}${r.dur?' / '+fmtDur(r.dur):''}</p>
     <div class="sum"><ol>${a.summary.map(s=>`<li>${esc(s)}</li>`).join('')}</ol></div>
+    <div class="sec" id="audioBox" hidden><h3>원본 녹음</h3><audio controls preload="metadata" style="width:100%"></audio></div>
     ${flowHTML(r)}
     ${a.todos.length?`<div class="sec"><h3>내가 할 일<span class="act"><button class="tlink" data-send>${r.sent?'메모장에 보냄':'메모장으로 보내기'}</button></span></h3>
       ${a.todos.map((t,i)=>t.owner==='상대'?'':`<label class="todo ${r.done[i]?'done':''}"><input type="checkbox" data-todo="${i}" ${r.done[i]?'checked':''}><span>${esc(t.task)}${t.due||t.at!=null?`<small>${esc([t.due,t.at!=null?ts(t.at)+'에 언급':''].filter(Boolean).join(' / '))}</small>`:''}</span></label>`).join('')}
@@ -705,6 +817,7 @@ function renderDetail(id,silent){
     ${r.status==='done'?`<button class="rawbtn" data-raw>요약 없이 원문만 보기</button><div class="btns" style="margin-top:14px"><button class="btn" data-copy="sum">요약 복사</button><button class="btn" data-rename>이름 고치기</button><button class="btn" data-resum>다시 요약</button><button class="btn danger" data-del>삭제</button></div>`:''}
   </div>`;
   if(!silent)openPage('pDetail');
+  attachAudio(id);
 }
 function sumText(r){const a=r.ai;let t=`${a.title}\n${r.name?r.name+' / ':''}${fullDate(r.date)}\n\n요약\n${a.summary.map(s=>'- '+s).join('\n')}`;if(a.todos.length)t+=`\n\n할 일\n${a.todos.map(x=>'- '+x.task+(x.due?` (${x.due})`:'')).join('\n')}`;if(a.decisions.length)t+=`\n\n합의·약속\n${a.decisions.map(s=>'- '+s).join('\n')}`;return t}
 async function copy(t){try{await navigator.clipboard.writeText(t);toast('복사했습니다')}catch{toast('복사하지 못했습니다')}}
@@ -752,9 +865,11 @@ async function sendMemo(r){
 }
 
 /* ---------- 설정 ---------- */
-function renderSettings(){
-  const m=monthCost();
+function renderSettings(silent){
+  const m=monthCost();const u=cloud.user;
   $('#pSettings').innerHTML=`<div class="pbar">${BACK}<span class="t" id="setTitle">설정</span></div><div class="pin">
+    <div class="acct">${u?`<div><b>${esc(u.email||u.displayName||'로그인됨')}</b><p>기록, 폴더, 설정, 녹음 파일이 이 계정에 저장되고 다른 기기와 맞춰집니다.</p></div><button class="btn sm" id="logoutBtn">로그아웃</button>`
+      :`<div><b>기기 간 동기화</b><p>구글로 로그인하면 폰을 바꾸거나 맥북에서 열어도 기록이 그대로 보입니다.</p></div><button class="btn pri sm" id="loginBtn">구글로 로그인</button>`}</div>
     <div class="field"><label for="s4">이름</label><input id="s4" value="${esc(S.me)}" placeholder="예: 김비업"></div>
     <div class="field"><label for="s8">불러드릴 호칭</label><input id="s8" value="${esc(S.title||'')}" placeholder="예: 대표님, 원장님"><p>요약에서 나를 이 이름과 호칭으로 구분하고, 첫 화면 인사에도 씁니다.</p></div>
     ${S.owner?`<div class="usage" style="margin-top:6px"><div class="meta">이번 달 사용액 (관리자에게만 보임)</div><div class="big">${won(m.krw)}</div><div class="cmp">녹음 ${fmtDur(m.sec)||'0분'} 정리</div></div>`:''}
@@ -764,9 +879,10 @@ function renderSettings(){
       <div class="field"><label for="s5">AI 메모장 주소</label><input id="s5" value="${esc(S.memoUrl)}" placeholder="https://..."></div>
     </details>
     <div class="btns"><button class="btn pri" id="saveSet">저장</button></div></div>`;
+  const lb=$('#loginBtn');if(lb)lb.onclick=()=>cloud.login();const ob=$('#logoutBtn');if(ob)ob.onclick=()=>{if(confirm('로그아웃할까요? 이 기기 기록은 지워지지 않습니다.'))cloud.logout()};
   $('#saveSet').onclick=()=>{S.me=$('#s4').value.trim();S.title=$('#s8').value.trim();S.groqKey=$('#s1').value.trim();S.claudeKey=$('#s2').value.trim();S.memoUrl=$('#s5').value.trim();saveSet();toast('저장했습니다');greet();runQueue()};
   let taps=0,tt=null;$('#setTitle').onclick=()=>{taps++;clearTimeout(tt);tt=setTimeout(()=>taps=0,1500);if(taps>=5){taps=0;S.owner=!S.owner;saveSet();toast(S.owner?'관리자 모드를 켰습니다':'관리자 모드를 껐습니다');renderSettings()}};
-  openPage('pSettings');
+  if(!silent)openPage('pSettings');
 }
 function greet(){const t=$('#heroTitle');if(!t||PROG||lastDone)return;const hh=$('#heroHint');if(hh)hh.textContent='눌러서 고르거나, 통화 녹음에서 공유로 보내세요';const who=[S.me,S.title].filter(Boolean).join(' ');t.textContent=who?`${S.title||S.me}, 이 폴더에 녹음 파일을 넣어주세요`:'이 폴더에 녹음 파일을 넣어주세요'}
 
@@ -900,6 +1016,7 @@ $('#pDrawer').addEventListener('click',e=>{
     const used=new Set();RECS.filter(r=>!r.sample&&r.folderId).forEach(r=>pathOf(r.folderId).forEach(f=>used.add(f.id)));
     FOLDERS=FOLDERS.filter(f=>!f.parentId||used.has(f.id)||!f.auto);saveFolders();await load()}}
   if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+  cloud.init();
   await takeInbox();
   if(location.search.includes('shared'))history.replaceState(null,'',location.pathname);
   if(S.groqKey&&S.claudeKey)runQueue();

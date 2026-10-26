@@ -288,12 +288,24 @@ async function del(st,k){const out=await rawDel(st,k);if(st==='records')cloud.re
 const DEVICE=(()=>{try{let d=localStorage.getItem('listen-dev');if(!d){d='d'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);localStorage.setItem('listen-dev',d)}return d}catch{return'd0'}})();
 const FB_CFG={apiKey:"AIzaSyAuNmwz77xaWoySCnayHqO1wag8k5cO1co",authDomain:"biup-listen.firebaseapp.com",projectId:"biup-listen",storageBucket:"biup-listen.firebasestorage.app",messagingSenderId:"407550754108",appId:"1:407550754108:web:c18277a0c7c8dad5ae3239"};
 const FB_V='https://www.gstatic.com/firebasejs/13.1.0/';
+const RECAPTCHA_KEY='6Lf8ygEuAAAAACIFd_2_ksZO5yAXWJclDS2W0Bxb'; // 공개용 사이트 키(비밀 아님)
 const cloud={
-  ready:false,user:null,m:null,auth:null,db:null,st:null,unsubs:[],metaU:{},
-  async init(){
+  ready:false,user:null,m:null,auth:null,db:null,st:null,unsubs:[],metaU:{},app:null,_ai:null,_p:null,
+  init(){return this._p||(this._p=this._init())},
+  // Gemini (Firebase AI Logic) — 키 없이 이 프로젝트 결제로 동작
+  async gem(sys){
+    await this.init();if(!this.app)throw new Error('인터넷 연결을 확인하세요.');
+    // Agent Platform Gemini API(구 Vertex AI): 선불 충전 없이 Blaze 결제로 후불 청구
+    if(!this._ai){const x=await import(FB_V+'firebase-ai.js');this._ai={x,ai:x.getAI(this.app,{backend:new x.AgentPlatformBackend('global')})}}
+    const {x,ai}=this._ai;
+    return x.getGenerativeModel(ai,{model:S.gModel||DEF.gModel,...(sys?{systemInstruction:sys}:{})});
+  },
+  async _init(){
     try{
       const [app,au,fs,st]=await Promise.all(['firebase-app','firebase-auth','firebase-firestore','firebase-storage'].map(n=>import(FB_V+n+'.js')));
-      this.m={...au,...fs,...st};const a=app.initializeApp(FB_CFG);
+      this.m={...au,...fs,...st};const a=app.initializeApp(FB_CFG);this.app=a;
+      // 앱 체크: 이 앱(biup-lab.github.io)에서 온 요청만 Gemini를 쓸 수 있게 한다
+      try{const ac=await import(FB_V+'firebase-app-check.js');ac.initializeAppCheck(a,{provider:new ac.ReCaptchaEnterpriseProvider(RECAPTCHA_KEY),isTokenAutoRefreshEnabled:true})}catch(e){console.warn('app check',e)}
       this.auth=au.getAuth(a);this.db=fs.getFirestore(a);this.st=st.getStorage(a);
       au.getRedirectResult(this.auth).catch(e=>console.warn(e));
       au.onAuthStateChanged(this.auth,u=>{this.user=u;this.stop();if(u)this.start();this.ui()});
@@ -340,7 +352,7 @@ const cloud={
     const firstTime=!this.metaU[kind];this.metaU[kind]=1;
     const d=snap.exists()?snap.data():null;let v=null;try{v=d&&JSON.parse(d.j)}catch{}
     if(kind==='settings'){
-      if(v){for(const k in v){if(k==='owner')continue;if(firstTime&&!v[k]&&S[k])continue;S[k]=v[k]}localStorage.setItem('listen-set',JSON.stringify(S));greet();if(S.groqKey&&S.claudeKey)runQueue()}
+      if(v){for(const k in v){if(k==='owner')continue;if(firstTime&&!v[k]&&S[k])continue;S[k]=v[k]}localStorage.setItem('listen-set',JSON.stringify(S));greet();if(engine())runQueue()}
       if(firstTime&&(!v||Object.keys(S).some(k=>k!=='owner'&&S[k]&&!v[k])))this.meta('settings');
       if(document.getElementById('pSettings').classList.contains('open'))renderSettings(true);
     }else{
@@ -386,8 +398,11 @@ async function attachAudio(id){
 }
 
 const S=JSON.parse(localStorage.getItem('listen-set')||'{}');
-const DEF={groqKey:'',claudeKey:'',model:'claude-haiku-5-5',me:'',title:'',memoUrl:'',krw:1400,subs:28000,inRate:1,outRate:5};
+const DEF={groqKey:'',claudeKey:'',model:'claude-haiku-5-5',ai:'auto',gModel:'gemini-3.5-flash',gInRate:1,gOutRate:4,me:'',title:'',memoUrl:'',krw:1400,subs:28000,inRate:1,outRate:5};
 for(const k in DEF) if(S[k]===undefined) S[k]=DEF[k];
+/* 정리 엔진: 'groq'(Groq+Claude 키) / 'gemini'(키 없음) / null(쓸 수 없음) */
+const hasKeys=()=>!!(S.groqKey&&S.claudeKey);
+function engine(){if(S.ai==='gemini')return'gemini';if(S.ai==='groq')return hasKeys()?'groq':null;return hasKeys()?'groq':'gemini'}
 const saveSet=()=>{localStorage.setItem('listen-set',JSON.stringify(S));if(typeof cloud!=='undefined')cloud.meta('settings')};
 
 let RECS=[], Q="";
@@ -435,7 +450,7 @@ async function addFiles(files){
     await put('audio',f,id);await put('records',rec);
   }
   await load();
-  if(!S.groqKey||!S.claudeKey){toast('설정에서 연결 키를 넣으면 바로 정리를 시작합니다',3000);renderSettings();return}
+  if(!engine()){toast('설정에서 연결 키를 넣거나 AI를 Gemini로 바꾸면 바로 정리를 시작합니다',3200);renderSettings();return}
   toast(`${files.length}개 파일을 받았습니다`);runQueue();
 }
 async function takeInbox(){
@@ -466,12 +481,12 @@ function groq(blob,fname,prompt,onUp){
   });
 }
 function wav(samples,rate){const b=new ArrayBuffer(44+samples.length*2),v=new DataView(b);const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};w(0,'RIFF');v.setUint32(4,36+samples.length*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,samples.length*2,true);let o=44;for(let i=0;i<samples.length;i++,o+=2){const x=Math.max(-1,Math.min(1,samples[i]));v.setInt16(o,x<0?x*32768:x*32767,true)}return new Blob([b],{type:'audio/wav'})}
-async function splitAudio(blob){
+async function splitAudio(blob,sec=600){
   const rate=16000;const ctx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate});
   const buf=await ctx.decodeAudioData(await blob.arrayBuffer());ctx.close();
   const n=buf.length,ch=buf.numberOfChannels;const mono=new Float32Array(n);
   for(let c=0;c<ch;c++){const d=buf.getChannelData(c);for(let i=0;i<n;i++)mono[i]+=d[i]/ch}
-  const step=rate*600,out=[];for(let i=0;i<n;i+=step)out.push({blob:wav(mono.subarray(i,Math.min(n,i+step)),rate),offset:i/rate});
+  const step=rate*sec,out=[];for(let i=0;i<n;i+=step)out.push({blob:wav(mono.subarray(i,Math.min(n,i+step)),rate),offset:i/rate});
   return out;
 }
 function cleanSegs(segs){
@@ -481,6 +496,69 @@ function cleanSegs(segs){
     if(out.length&&out[out.length-1].text===t)continue;
     out.push({start:s.start,end:s.end,text:t})}
   return out;
+}
+
+/* ---------- 전사 (Gemini, 키 없음) ---------- */
+const GEM_INLINE=14*1024*1024,GEM_PIECE=300;
+const b64=blob=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=()=>rej(new Error('파일을 읽지 못했습니다.'));r.readAsDataURL(blob)});
+function gemMime(blob,fname){
+  const t=(blob.type||'').toLowerCase(),e=(fname||'').split('.').pop().toLowerCase();
+  if(t==='audio/wav'||t==='audio/x-wav'||e==='wav')return'audio/wav';
+  if(e==='mp3'||t==='audio/mpeg'||t==='audio/mp3')return'audio/mp3';
+  if(['ogg','oga','opus'].includes(e)||t.includes('ogg'))return'audio/ogg';
+  if(e==='flac'||t.includes('flac'))return'audio/flac';
+  if(e==='aac'||t==='audio/aac')return'audio/aac';
+  if(e==='webm'||t.includes('webm'))return'audio/webm';
+  if(['m4a','mp4'].includes(e)||t.includes('mp4')||t.includes('m4a'))return'audio/mp4';
+  return null;
+}
+function gemErr(e){
+  const m=String(e?.message||e);console.warn('gemini',e);
+  if(/429|quota|RESOURCE_EXHAUSTED|rate/i.test(m))throw new Error('Gemini 사용 한도에 걸렸습니다. 잠시 뒤 다시 시도하세요.');
+  if(/app.?check|403|PERMISSION|has not been used|disabled|billing|spend/i.test(m))throw new Error('Gemini 연결이 막혀 있습니다. Firebase 콘솔의 AI Logic·지출 한도를 확인하세요.');
+  if(/Failed to fetch|network|인터넷/i.test(m))throw new Error('인터넷 연결을 확인하세요.');
+  throw new Error('Gemini 처리에 실패했습니다. 다시 시도하세요.');
+}
+async function gemStream(model,req,rec,onText){
+  const r=await model.generateContentStream(req);let text='';
+  for await(const c of r.stream){try{text+=c.text()}catch{}onText&&onText(text)}
+  const u=(await r.response).usageMetadata||{};
+  rec.cost.gIn=(rec.cost.gIn||0)+(u.promptTokenCount||0);
+  rec.cost.gOut=(rec.cost.gOut||0)+(u.candidatesTokenCount||0)+(u.thoughtsTokenCount||0);
+  return text;
+}
+function parseGemLines(t,offset,endAt){
+  const out=[];
+  for(const raw of t.split('\n')){
+    const m=raw.trim().match(/^\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\]?\s*[-:]?\s*(.+)$/);if(!m)continue;
+    const s=m[3]!==undefined?(+m[1]*3600+ +m[2]*60+ +m[3]):(+m[1]*60+ +m[2]);const text=m[4].trim();
+    if(text&&text!=='없음')out.push({start:s+offset,end:0,text});
+  }
+  if(!out.length){const plain=t.trim();if(plain&&plain!=='없음')out.push({start:offset,end:endAt,text:plain.replace(/\s+/g,' ')})}
+  out.sort((a,b)=>a.start-b.start);
+  for(let i=0;i<out.length;i++)if(!out[i].end)out[i].end=i+1<out.length?Math.max(out[i].start,out[i+1].start):Math.max(out[i].start,endAt);
+  return out;
+}
+async function gemSTT(rec,blob,hint,onPct){
+  const model=await cloud.gem();
+  const ask=`이 녹음을 한국어로 빠짐없이 받아 적어라. ${hint}
+규칙: 말이 시작되는 시각을 [분:초]로 줄 앞에 붙이고, 한 줄에 한두 문장씩 적는다. 예) [0:05] 안녕하세요 대표님
+요약하거나 다듬지 말고 들리는 그대로 적는다. 말소리가 전혀 없으면 '없음'만 적는다. 다른 설명은 쓰지 않는다.`;
+  const run=async pieces=>{const segs=[];
+    for(let k=0;k<pieces.length;k++){const p=pieces[k];const len=Math.max(30,p.end-p.offset);
+      const t=await gemStream(model,[{inlineData:{mimeType:p.mime,data:await b64(p.blob)}},{text:ask}],rec,x=>onPct&&onPct((k+Math.min(.95,x.length/(len*7)))/pieces.length));
+      segs.push(...parseGemLines(t,p.offset,p.offset+len))}
+    return segs};
+  const split=async()=>{const parts=await splitAudio(blob,GEM_PIECE);
+    return run(parts.map((p,i)=>({blob:p.blob,mime:'audio/wav',offset:p.offset,end:i+1<parts.length?parts[i+1].offset:Math.max(rec.dur||0,p.offset+1)})))};
+  const mime=gemMime(blob,rec.fileName);
+  try{
+    if(mime&&blob.size<=GEM_INLINE&&(rec.dur||0)<=GEM_PIECE*3){
+      try{return await run([{blob,mime,offset:0,end:rec.dur||0}])}
+      catch(e){if(/429|quota|RESOURCE_EXHAUSTED|403|PERMISSION|Failed to fetch/i.test(String(e?.message||e)))throw e;console.warn('원본 전송 실패, 나눠서 다시',e)}
+    }
+    return await split();
+  }catch(e){gemErr(e)}
 }
 
 /* ---------- 요약 (Claude, 실시간) ---------- */
@@ -534,9 +612,13 @@ async function summarize(rec,onText){
 3단계는 대화 상대가 분명하면 '김학성 원장님'처럼 이름+호칭, 아니면 생략.
 기존 경로 [${folderNames()}] 중 같은 대상이 있으면 그 이름을 글자 그대로 다시 쓴다. 이름이 조금 달라도 같은 곳이면 기존 이름을 쓴다.`;
   const user=`상대: ${rec.name||'알 수 없음'}\n날짜: ${fullDate(rec.date)}\n\n녹취록:\n${body}`;
+  let text='';
+  if(engine()==='gemini'){
+    try{text=await gemStream(await cloud.gem(sys),user,rec,onText)}catch(e){gemErr(e)}
+  }else{
   const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':S.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:S.model,max_tokens:2000,stream:true,system:sys,messages:[{role:'user',content:user}]})});
   if(!r.ok){throw new Error(r.status===401?'Claude 키가 올바르지 않습니다. 설정에서 확인하세요.':'요약에 실패했습니다 ('+r.status+')')}
-  const rd=r.body.getReader(),dec=new TextDecoder();let buf='',text='';
+  const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
   while(true){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});
     let i;while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i).trim();buf=buf.slice(i+1);
       if(!line.startsWith('data:'))continue;let ev;try{ev=JSON.parse(line.slice(5))}catch{continue}
@@ -544,6 +626,7 @@ async function summarize(rec,onText){
       if(ev.type==='message_start')rec.cost.inTok+=ev.message?.usage?.input_tokens||0;
       if(ev.type==='message_delta')rec.cost.outTok+=ev.usage?.output_tokens||0;
       if(ev.type==='error')throw new Error('요약 중 오류가 났습니다. 다시 시도하세요.')}}
+  }
   const o=parseSum(text);if(!o.title&&!o.summary.length)throw new Error('요약 결과를 읽지 못했습니다. 다시 시도하세요.');
   return o;
 }
@@ -648,7 +731,7 @@ function flowHTML(r){
 let running=false;
 async function runQueue(){
   if(running)return;
-  if(!S.groqKey||!S.claudeKey)return;
+  if(!engine())return;
   running=true;
   try{
     while(true){
@@ -664,8 +747,10 @@ async function runQueue(){
           soundEnvelope(blob).then(env=>{if(env&&PROG&&PROG.id===rec.id&&!PROG.textShape)setHeights(env)});
           const prompt=rec.name?`${rec.name}님과의 통화입니다.`:'';
           const est=Math.max(4,(rec.dur||120)/120);
-          let segs=[];
-          if(blob.size<=GROQ_LIMIT){
+          let segs=[];const eng=engine();
+          if(eng==='gemini'){
+            setPct(3);segs=await gemSTT(rec,blob,prompt,f=>setPct(3+f*51));
+          }else if(blob.size<=GROQ_LIMIT){
             const j=await groq(blob,rec.fileName||'audio.m4a',prompt,(f,up)=>{setPct(f*25);if(up)startCreep(25,54,est)});
             segs=j.segments||[{start:0,end:j.duration||0,text:j.text}];if(!rec.dur&&j.duration)rec.dur=j.duration;
           }else{
@@ -678,7 +763,7 @@ async function runQueue(){
           rec.segments=cleanSegs(segs);rec.text=rec.segments.map(s=>s.text).join(' ');
           {const last=rec.segments.length?rec.segments[rec.segments.length-1].end:0;if(last>(rec.dur||0)*1.05)rec.dur=last}
           {const dn=textDensity(rec.segments,rec.dur);if(dn){rec.dens=dn;PROG.textShape=1;setHeights(dn)}}
-          rec.cost.groq=(rec.dur||0)/3600*0.111;
+          if(eng!=='gemini')rec.cost.groq=(rec.dur||0)/3600*0.111;
         }else{setPct(55);const dn=rec.dens||textDensity(rec.segments,rec.dur);if(dn){PROG.textShape=1;setHeights(dn)}}
         rec.status='sum';await put('records',rec);
         if(rec.segments.length){
@@ -738,7 +823,7 @@ function renderResults(){
   const q=norm(Q);const rs=RECS.filter(r=>r.status==='done'&&norm([r.name,r.phone,r.ai?.title,...(r.ai?.summary||[]),r.text,folderOf(r)?pathText(r.folderId):''].join(' ')).includes(q));
   $('#results').innerHTML=rs.length?rs.map(recCard).join(''):`<div class="empty">찾는 내용이 없습니다. 다른 단어로 검색해보세요.</div>`;
 }
-function monthCost(){const n=new Date();let usd=0,sec=0;RECS.forEach(r=>{const d=new Date(r.createdAt);if(d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear()){usd+=(r.cost?.groq||0)+(r.cost?.inTok||0)/1e6*S.inRate+(r.cost?.outTok||0)/1e6*S.outRate;sec+=r.dur||0}});return{krw:usd*S.krw,sec}}
+function monthCost(){const n=new Date();let usd=0,sec=0;RECS.forEach(r=>{const d=new Date(r.createdAt);if(d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear()){usd+=(r.cost?.groq||0)+(r.cost?.inTok||0)/1e6*S.inRate+(r.cost?.outTok||0)/1e6*S.outRate+(r.cost?.gIn||0)/1e6*S.gInRate+(r.cost?.gOut||0)/1e6*S.gOutRate;sec+=r.dur||0}});return{krw:usd*S.krw,sec}}
 function updateUsage(){$('#usageChip').textContent=won(monthCost().krw)}
 
 /* ---------- 폴더 화면 ---------- */
@@ -873,14 +958,19 @@ function renderSettings(silent){
     <div class="field"><label for="s4">이름</label><input id="s4" value="${esc(S.me)}" placeholder="예: 김비업"></div>
     <div class="field"><label for="s8">불러드릴 호칭</label><input id="s8" value="${esc(S.title||'')}" placeholder="예: 대표님, 원장님"><p>요약에서 나를 이 이름과 호칭으로 구분하고, 첫 화면 인사에도 씁니다.</p></div>
     ${S.owner?`<div class="usage" style="margin-top:6px"><div class="meta">이번 달 사용액 (관리자에게만 보임)</div><div class="big">${won(m.krw)}</div><div class="cmp">녹음 ${fmtDur(m.sec)||'0분'} 정리</div></div>`:''}
-    <details class="field" style="border-top:1px solid var(--line);padding-top:14px" ${S.groqKey&&S.claudeKey?'':'open'}><summary style="font-weight:600;font-size:14px;cursor:pointer;color:var(--sub)">연결${S.groqKey&&S.claudeKey?' / 완료':''}</summary>
-      <div class="field" style="margin-top:12px"><label for="s1">Groq 키</label><input id="s1" type="password" value="${esc(S.groqKey)}" placeholder="gsk_..."></div>
+    <details class="field" style="border-top:1px solid var(--line);padding-top:14px" ${engine()?'':'open'}><summary style="font-weight:600;font-size:14px;cursor:pointer;color:var(--sub)">연결${engine()==='gemini'?' / Gemini':engine()?' / Groq+Claude':''}</summary>
+      <div class="field" style="margin-top:12px"><label for="s9">정리에 쓸 AI</label><select id="s9">
+        <option value="auto" ${S.ai==='auto'?'selected':''}>자동 (키 있으면 Groq+Claude)</option>
+        <option value="groq" ${S.ai==='groq'?'selected':''}>Groq + Claude (키 필요)</option>
+        <option value="gemini" ${S.ai==='gemini'?'selected':''}>Gemini (키 필요 없음)</option></select>
+        <p>Gemini는 키 없이 Firebase 결제로 쓰입니다. Groq+Claude는 아래 두 키가 모두 있어야 합니다.</p></div>
+      <div class="field"><label for="s1">Groq 키</label><input id="s1" type="password" value="${esc(S.groqKey)}" placeholder="gsk_..."></div>
       <div class="field"><label for="s2">Claude 키</label><input id="s2" type="password" value="${esc(S.claudeKey)}" placeholder="sk-ant-..."></div>
       <div class="field"><label for="s5">AI 메모장 주소</label><input id="s5" value="${esc(S.memoUrl)}" placeholder="https://..."></div>
     </details>
     <div class="btns"><button class="btn pri" id="saveSet">저장</button></div></div>`;
   const lb=$('#loginBtn');if(lb)lb.onclick=()=>cloud.login();const ob=$('#logoutBtn');if(ob)ob.onclick=()=>{if(confirm('로그아웃할까요? 이 기기 기록은 지워지지 않습니다.'))cloud.logout()};
-  $('#saveSet').onclick=()=>{S.me=$('#s4').value.trim();S.title=$('#s8').value.trim();S.groqKey=$('#s1').value.trim();S.claudeKey=$('#s2').value.trim();S.memoUrl=$('#s5').value.trim();saveSet();toast('저장했습니다');greet();runQueue()};
+  $('#saveSet').onclick=()=>{S.me=$('#s4').value.trim();S.title=$('#s8').value.trim();S.groqKey=$('#s1').value.trim();S.claudeKey=$('#s2').value.trim();S.ai=$('#s9').value;S.memoUrl=$('#s5').value.trim();saveSet();toast('저장했습니다');greet();runQueue()};
   let taps=0,tt=null;$('#setTitle').onclick=()=>{taps++;clearTimeout(tt);tt=setTimeout(()=>taps=0,1500);if(taps>=5){taps=0;S.owner=!S.owner;saveSet();toast(S.owner?'관리자 모드를 켰습니다':'관리자 모드를 껐습니다');renderSettings()}};
   if(!silent)openPage('pSettings');
 }
@@ -1019,7 +1109,7 @@ $('#pDrawer').addEventListener('click',e=>{
   cloud.init();
   await takeInbox();
   if(location.search.includes('shared'))history.replaceState(null,'',location.pathname);
-  if(S.groqKey&&S.claudeKey)runQueue();
+  if(engine())runQueue();
 })();
 </script>
 </body>
